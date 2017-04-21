@@ -18,7 +18,7 @@ However, please note that reproducing the simulation and application results on 
 
 I. R package hergm:
 
-hergm_3.2-0.tar.gz
+hergm_3.2-1.tar.gz
 
 II. R scripts:
 
