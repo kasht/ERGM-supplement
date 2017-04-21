@@ -7,7 +7,7 @@ set.seed(123456)
 
 #number of cores, set equal to 1 for Windows
 #Run with mc.cores = 45 for the paper
-mc.cores = 45;
+mc.cores = 1;
 
 #Preprocessing
 
