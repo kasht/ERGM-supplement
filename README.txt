@@ -12,7 +12,7 @@ Please note:
 2. The simulations and data analyses were executed on a 48-core machine. 
 The 48-core machine finished the simulation study and data analyses within three weeks. 
 To facilitate reproducibility on a single-core machine, we set the number of cores in the attached R scripts to 1: mc.cores <- 1. 
-However, please note that reproducing the simulation results on a single-core machine may take up to 24 months.
+However, please note that reproducing the simulation and application results on a single-core machine may take up to 24 months.
 
 3. The simulations and data analyses require ~ 8GB RAM for working with large matrices and ~ 12 GB disk space to store the simulated networks used in the simulation study.
 

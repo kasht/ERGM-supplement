@@ -43,6 +43,7 @@ run_simulation_fast <- function(index,path,
   
   result <- hergm(network ~ edges + transitiveties, 
                   method = "ml", 
+                  initialization_method = 2,
                   parameterization = parameterization, 
                   estimate_parameters = TRUE, 
                   max_number = n_clusters, 
@@ -89,7 +90,8 @@ run_simulation_bayesian <- function(index, path, parameterization, max_number){
   
   result <- hergm(network ~ edges_ij + transitiveties_ijk, 
                   verbose = -1,max_number = max_number, initialize = TRUE,
-                  relabel = 1, number_runs = 3)
+                  relabel = 1, number_runs = 3, 
+                  initialization_method = 2)
   
   b <- Sys.time()
   

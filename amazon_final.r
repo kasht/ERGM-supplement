@@ -7,7 +7,7 @@ set.seed(123456)
 
 #number of cores, set equal to 1 for Windows
 #Run with mc.cores = 45 for the paper
-mc.cores = 1;
+mc.cores = 45;
 
 #Preprocessing
 
@@ -65,8 +65,6 @@ storage.mode(node_indeces) <- "character"
 
 network <- as.network.matrix(output, directed = FALSE)
 
-adj_matrix <- as.matrix(network)
-
 names <- network::get.vertex.attribute(network, "vertex.names")
 new_order <- numeric(n_nodes)
 for (i in 1:n_nodes){
@@ -77,19 +75,6 @@ network::set.vertex.attribute(network, "true_partition",
                               value = nodes$group_indeces[new_order])
 true_partition <- nodes$group_indeces[new_order]
 
-result <- EM_wrapper_fast(network = adj_matrix,
-                          formula =  as.formula("network ~ edges + transitiveties"),
-                          max_number = 500,
-                          min_size = 1,
-                          n_em_step_max = 500,
-                          start_alg = "WalkTrap",
-                          verbose = 1)
-
-rm(adj_matrix)
-
-indicator <- as.numeric(result$z_memb_final)
-
-print(find_phi_coefficient(true_partition, indicator))
 
 ######################################################################################
 ######################################################################################
@@ -103,27 +88,29 @@ print(find_phi_coefficient(true_partition, indicator))
 
 formula <- network ~ edges
 
+
 result_sbm <- hergm(formula,
                     method = "ml",
                     parameterization = "size",
                     estimate_parameters = TRUE,
-                    indicator = indicator,
                     max_number = 500,
                     parallel = mc.cores,
                     verbose = 0,
-                    sample_size = 500,
-                    burnin = 5e+4,
-                    interval = 1000,
-                    max_iter = 50)
+                    sample_size = 1e+5,
+                    sample_size_multiplier_block = NULL,
+                    n_em_step_max = 500,
+                    max_iter = 100)
 
 params_sbm <- c(result_sbm$results$parameters,rep(0,4),result_sbm$results$between_parameter)
 st.error_sbm <- c(result_sbm$results$st.error,rep(0,4),result_sbm$results$st.error.between)
+
+indicator <- as.numeric(result_sbm$results$partition)
 
 # Full model estimation
 
 formula <- network ~ edges + gwesp(fixed = FALSE, cutoff = 12) + gwdegree(fixed = FALSE, cutoff = 20)
 
-#Starting values of parameters was obtained by experiments with marginal models having
+#Starting values of parameters were obtained by experiments with marginal models having
 #only one geometrically weighted term unconstrained while the other one had a fixed decay
 init_estimate <- c(-1.403, 0.291, 1.161, 1.086, 0.760)
 
@@ -135,16 +122,16 @@ result_full <- hergm(formula,
                      max_number = 500,
                      parallel = mc.cores,
                      verbose = 0,
-                     sample_size = 200,
-                     burnin = 1e+5,
-                     interval = 500,
+                     sample_size = 1e+5,
+                     sample_size_multiplier_block = NULL,
                      max_iter = 100,
                      initial_estimate = init_estimate)
 
 params <- result_full$results$parameters
-st.error_ergm <- c(result_full$results$st.error, result_full$results$st.error)
+st.error_ergm <- c(result_full$results$st.error, result_full$results$st.error.between)
 
 params_ergm <- c(params,result_full$results$between_parameter)
+
 
 
 ######################################################################################
@@ -155,135 +142,151 @@ params_ergm <- c(params,result_full$results$between_parameter)
 ######################################################################################
 ######################################################################################
 
-net_list <- rep(list(NULL), 500)
-for (k in 1:500) {
-  print(k)
-  if (sum(indicator == k) > 1) {
-    v_id <- which(indicator == k)
-    net_list[[k]] <- get.inducedSubgraph(network, v = v_id)
+gof_new <- function(network, indicator, eta, formula, n_trials, threshold = 20, 
+                    parameterization, mc.cores) {
+  
+  num_clust <- length(table(indicator))
+  
+  net_list <- rep(list(NULL), num_clust)
+  for (k in 1:num_clust) {
+    print(k)
+    if (sum(indicator == k) > 1) {
+      v_id <- which(indicator == k)
+      net_list[[k]] <- get.inducedSubgraph(network, v = v_id)
+    }
   }
-}
-
-gof_fun <- function(net_list, eta_, formula, n_trials, curved = NULL) {
+  
   stats <- list()
   
-  n_count <- 20
-  stats$dist <- matrix(0,n_trials, n_count)
-  stats$esp <- matrix(0,n_trials, n_count)
-  stats$degree <- matrix(0,n_trials, n_count)
-  stats$dsp <- matrix(0,n_trials, n_count)
+  stats$dist <- matrix(0,n_trials, threshold)
+  stats$esp <- matrix(0,n_trials, threshold)
+  stats$degree <- matrix(0,n_trials, threshold)
+  stats$dsp <- matrix(0,n_trials, threshold)
   stats$tr_edges <- matrix(0,n_trials, 1)
   stats$edges <- matrix(0,n_trials, 1)
   
-  stats$obs.dist <- numeric(n_count)
-  stats$obs.esp <- numeric(n_count)
-  stats$obs.degree <- numeric(n_count)
-  stats$obs.dsp <- numeric(n_count)
+  stats$obs.dist <- numeric(threshold)
+  stats$obs.esp <- numeric(threshold)
+  stats$obs.degree <- numeric(threshold)
+  stats$obs.dsp <- numeric(threshold)
   stats$obs.tr_edges <- numeric(1)
   stats$obs.edges <- numeric(1)
   
-  n_networks <- length(net_list)
+  
+  if (parameterization == "size"){
+    model <- ergm.getmodel(formula, network)
+    no_scaling <- c()
+    if (length(model$etamap$curved) > 0) {
+      for (i in 1:length(model$etamap$curved))
+      {
+        no_scaling <- c(no_scaling, model$etamap$curved[[i]]$from[2])
+      }
+    }
+  } else {
+    no_scaling <- NULL
+  }
+  
   
   rhs <- paste(deparse(formula[[3]]), collapse = "")
   
   
+  test <- mclapply(1:num_clust,gof_one_clust,net_list, no_scaling, parameterization, 
+                   eta, rhs, threshold, n_trials, mc.cores = mc.cores, mc.preschedule = F)
   
-  for (k in 1:n_networks){
-    cat(paste("\n\n Simulating neighborhood: ", k))
-    cur_net <- net_list[[k]]
+  for (i in 1:num_clust){
+    #test[[1]] <- 
+    stats$dist <- stats$dist + test[[i]]$sim.dist[,1:threshold]
+    stats$esp <- stats$esp + test[[i]]$sim.espart[,1:threshold]
+    stats$degree <- stats$degree + test[[i]]$sim.deg[,1:threshold]
+    stats$dsp <- stats$dsp + test[[i]]$sim.dspart[,1:threshold]
+    stats$tr_edges <- stats$tr_edges + rowSums(test[[i]]$sim.espart[,-1])
+    stats$edges <- stats$edges + rowSums(test[[i]]$sim.espart)
     
-    cur_eta <- eta_
-    if (!is.null(curved)) {
-      cur_eta[!curved] <- cur_eta[!curved]*log(cur_net$gal$n)
-    } else {
-      cur_eta[1:length(eta_)] <- cur_eta[1:length(eta_)] * 
-        log(cur_net$gal$n)
-    }
-    
-    formula <- as.formula(paste("cur_net ~ ",rhs,sep=""))
-    
-    test <- gof(formula, coef = cur_eta, GOF = ~ degree + espartners + distance + dspartners,
-                control = control.gof.formula(nsim=n_trials,MCMC.burnin=5e+4))
-    
-    if (length(test$sim.dist[1,]) < n_count + 1){
-      n_dim <- n_count + 1 - length(test$sim.dist[1,])
-      test$sim.dist <- cbind(test$sim.dist[,1:(length(test$sim.dist[1,])-1)], matrix(0,n_trials,n_dim))
-      test$obs.dist <- c(test$obs.dist[1:(length(test$obs.dist)-1)], numeric(n_dim))
-    }
-    
-    if (length(test$sim.espart[1,]) < n_count + 1){
-      n_dim <- n_count + 1 - length(test$sim.espart[1,])
-      test$sim.espart <- cbind(test$sim.espart[,1:(length(test$sim.espart[1,])-1)], matrix(0,n_trials,n_dim))
-      test$obs.esp <- c(test$obs.esp[1:(length(test$obs.esp)-1)], numeric(n_dim))
-    }
-    
-    if (length(test$sim.deg[1,]) < n_count + 1){
-      n_dim <- n_count + 1 - length(test$sim.deg[1,])
-      test$sim.deg <- cbind(test$sim.deg[,1:(length(test$sim.deg[1,])-1)], matrix(0,n_trials,n_dim))
-      test$obs.deg <- c(test$obs.deg[1:(length(test$obs.deg)-1)], numeric(n_dim))
-    }
-    
-    if (length(test$sim.dspart[1,]) < n_count + 1){
-      n_dim <- n_count + 1 - length(test$sim.dspart[1,])
-      test$sim.dspart <- cbind(test$sim.dspart[,1:(length(test$sim.dspart[1,])-1)], matrix(0,n_trials,n_dim))
-      test$obs.dsp <- c(test$obs.dsp[1:(length(test$obs.dsp)-1)], numeric(n_dim))
-    }
-    
-    stats$dist <- stats$dist + test$sim.dist[,1:n_count]
-    stats$esp <- stats$esp + test$sim.espart[,1:n_count]
-    stats$degree <- stats$degree + test$sim.deg[,1:n_count]
-    stats$dsp <- stats$dsp + test$sim.dspart[,1:n_count]
-    stats$tr_edges <- stats$tr_edges + rowSums(test$sim.espart[,-1])
-    stats$edges <- stats$edges + rowSums(test$sim.espart)
-    
-    stats$obs.dist <- stats$obs.dist + test$obs.dist[1:n_count]
-    stats$obs.esp <- stats$obs.esp + test$obs.esp[1:n_count]
-    stats$obs.degree <- stats$obs.degree + test$obs.deg[1:n_count]
-    stats$obs.dsp <- stats$obs.dsp + test$obs.dsp[1:n_count]
-    stats$obs.tr_edges <- stats$obs.tr_edges + sum(test$obs.espart[-1])
-    stats$obs.edges <- stats$obs.edges + sum(test$obs.espart)    
-    
+    stats$obs.dist <- stats$obs.dist + test[[i]]$obs.dist[1:threshold]
+    stats$obs.esp <- stats$obs.esp + test[[i]]$obs.esp[1:threshold]
+    stats$obs.degree <- stats$obs.degree + test[[i]]$obs.deg[1:threshold]
+    stats$obs.dsp <- stats$obs.dsp + test[[i]]$obs.dsp[1:threshold]
+    stats$obs.tr_edges <- stats$obs.tr_edges + sum(test[[i]]$obs.esp[-1])
+    stats$obs.edges <- stats$obs.edges + sum(test[[i]]$obs.esp)
   }
+  
   return(stats)
 }
 
+gof_one_clust <-function(k, net_list, no_scaling, parameterization, eta, rhs, threshold, n_trials) {
+  cat(paste("\n\n Simulating neighborhood: ", k))
+  cur_net <- net_list[[k]]
+  rm(net_list)
+  cur_eta <- eta
+  
+  if (parameterization == "size"){
+    if (!is.null(no_scaling)){
+      cur_eta[setdiff(1:length(cur_eta),no_scaling)] <- eta[setdiff(1:length(cur_eta),no_scaling)]*
+        log(cur_net$gal$n)
+    }else {
+      cur_eta[1:length(eta)] <- cur_eta[1:length(eta)] * log(cur_net$gal$n)
+    }
+  }
+  
+  
+  formula <- as.formula(paste("cur_net ~ ",rhs,sep=""))
+  
+  test <- gof(formula, coef = cur_eta, GOF = ~ degree + espartners + distance + dspartners,
+              control = control.gof.formula(nsim=n_trials,MCMC.burnin=5e+4))
+  
+  if (length(test$sim.dist[1,]) < threshold + 1){
+    n_dim <- threshold + 1 - length(test$sim.dist[1,])
+    test$sim.dist <- cbind(test$sim.dist[,1:(length(test$sim.dist[1,])-1)], matrix(0,n_trials,n_dim))
+    test$obs.dist <- c(test$obs.dist[1:(length(test$obs.dist)-1)], numeric(n_dim))
+  }
+  
+  if (length(test$sim.espart[1,]) < threshold + 1){
+    n_dim <- threshold + 1 - length(test$sim.espart[1,])
+    test$sim.espart <- cbind(test$sim.espart[,1:(length(test$sim.espart[1,])-1)], matrix(0,n_trials,n_dim))
+    test$obs.esp <- c(test$obs.esp[1:(length(test$obs.esp)-1)], numeric(n_dim))
+  }
+  
+  if (length(test$sim.deg[1,]) < threshold + 1){
+    n_dim <- threshold + 1 - length(test$sim.deg[1,])
+    test$sim.deg <- cbind(test$sim.deg[,1:(length(test$sim.deg[1,])-1)], matrix(0,n_trials,n_dim))
+    test$obs.deg <- c(test$obs.deg[1:(length(test$obs.deg)-1)], numeric(n_dim))
+  }
+  
+  if (length(test$sim.dspart[1,]) < threshold + 1){
+    n_dim <- threshold + 1 - length(test$sim.dspart[1,])
+    test$sim.dspart <- cbind(test$sim.dspart[,1:(length(test$sim.dspart[1,])-1)], matrix(0,n_trials,n_dim))
+    test$obs.dsp <- c(test$obs.dsp[1:(length(test$obs.dsp)-1)], numeric(n_dim))
+  }
+  test
+}
 
 set.seed(123456)
 
-full_new_stats <- gof_fun(net_list = net_list,
-                          eta_ = result_full$results$parameters,
+full_new_stats <- gof_new(network = network, 
+                          indicator = indicator,
+                          eta = result_full$results$parameters,
                           formula = result_full$formula,
                           n_trials = 1000,
-                          curved = c(0,0,1,0,1))
-
-
-sbm_stats <- gof_fun(net_list = net_list,
-                          eta_ = result_sbm$results$parameters,
-                          formula = result_sbm$formula,
-                          n_trials = 1000,
-                          curved = NULL)
+                          threshold = 20,
+                          parameterization = "size",
+                          mc.cores = mc.cores)
 
 
 
+sbm_stats <- gof_new(network = network, 
+                     indicator = indicator,
+                     eta = result_sbm$results$parameters,
+                     formula = result_sbm$formula,
+                     n_trials = 1000,
+                     threshold = 20,
+                     parameterization = "size",
+                     mc.cores = mc.cores)
 
 
 
 
-# Plotting
-norm_vec <- function(x) sqrt(sum(x^2))
 
-comparison <- matrix(0,2,3)
-stats <- sbm_stats
-comparison[1,1] <- norm_vec(colMeans(stats$esp) - stats$obs.esp)/norm_vec(stats$obs.esp)
-comparison[1,2] <- norm_vec(colMeans(stats$dist) - stats$obs.dist)/norm_vec(stats$obs.dist)
-comparison[1,3] <- norm_vec(colMeans(stats$dsp) - stats$obs.dsp)/norm_vec(stats$obs.dsp)
 
-stats <- full_new_stats
-comparison[2,1] <- norm_vec(colMeans(stats$esp) - stats$obs.esp)/norm_vec(stats$obs.esp)
-comparison[2,2] <- norm_vec(colMeans(stats$dist) - stats$obs.dist)/norm_vec(stats$obs.dist)
-comparison[2,3] <- norm_vec(colMeans(stats$dsp) - stats$obs.dsp)/norm_vec(stats$obs.dsp)
-
-print(comparison)
 
 
 # Plot for paper
@@ -329,7 +332,7 @@ axis(1, at=seq(1,13,2),labels=seq(1,13,2)-1, col.axis="black", las=1)
 
 plot(as.numeric(full_new_stats$obs.esp[range_esp]),type='l',ylim = c(0,12000), ylab = "", 
      xlab = "Number of edgewise shared partners",  
-         xaxt="n", 
+     xaxt="n", 
      cex.lab=x_axis_size)
 boxplot(full_new_stats$esp[,range_esp],col=color, add = TRUE,  xaxt="n",outcex=0.3,pch=16,
         medcol = color, whiskcol = color, staplecol = color, 
@@ -370,7 +373,7 @@ lines(range_dist,as.numeric(full_new_stats$obs.dist[range_dist]),lwd=2,col='red'
 
 plot(as.numeric(full_new_stats$obs.dsp[range_dsp]),type='l',ylim =c(0,55000), ylab = "", 
      xlab = "Number of dyadwise shared partners",  
-         xaxt="n", 
+     xaxt="n", 
      cex.lab=x_axis_size)
 boxplot(sbm_stats$dsp[,range_dsp],col='black', add = TRUE,  xaxt="n",outcex=0.3,pch=16,
         medcol = "black", whiskcol = "black",  staplecol = "black",outcol = "white",
